@@ -66,7 +66,7 @@ kbd {
   <div class="stage"><canvas id="game" tabindex="0" aria-label="Pantalla del juego Abismo Estelar"></canvas></div>
   <p class="rotate">GIRA EL MÓVIL PARA JUGAR A PANTALLA COMPLETA</p>
   <div class="net" id="net">
-    <span class="net-label">CO-OP ONLINE</span>
+    <span class="net-label">MULTIJUGADOR</span>
     <span class="net-status" id="netStatus">Conectando con la sala…</span>
     <div class="net-actions" id="netActions"></div>
   </div>
@@ -102,7 +102,15 @@ const TYPES = ['fish', 'dart', 'turret', 'jelly', 'carrier', 'mini'];
 const ICODE = [null, 'red', 'green', 'blue'];
 const STATES = ['title', 'play', 'branch', 'over'];
 const PHASES = ['waves', 'warn', 'boss'];
-const P_COL = ['#ffc93c', '#4dffd2'];
+const MAX_PLAYERS = 4;
+const P_COL = ['#ffc93c', '#4dffd2', '#ff7ad9', '#a8ff5c'];
+const P_HUE = [45, 160, 310, 95];
+const SHIP = [
+  { flame: '#7fe3ff', wing: '#7d8ea3', hull: '#d5e0ea', stripe: '#8496ab' },
+  { flame: '#ffd27f', wing: '#2f8f8a', hull: '#c8f5ec', stripe: '#3fa597' },
+  { flame: '#9fe3ff', wing: '#8f3f7f', hull: '#f5d3ec', stripe: '#b0559c' },
+  { flame: '#ffb36b', wing: '#5b8a2a', hull: '#e3f5c8', stripe: '#79a83f' }
+];
 
 const rnd = (a, b) => a + Math.random() * (b - a);
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
@@ -198,18 +206,20 @@ setMuted(muted);
 let state = 'title', paused = false, time = 0, scroll = 0, shake = 0;
 let score = 0, nextExtra = 40000, dep = 0, lane = 0, loop = 0, eid = 0;
 let phase = 'waves', zoneT = 0, spawnT = 0, warnT = 0, zoneCard = 0, branchT = 0, overT = 0, newHi = false;
-let P, P2 = null, boss = null;
+let P, PL = [], boss = null;   // P = nave de esta pantalla (jugador 1 en anfitrión/solo); PL = todas las naves
 let shots = [], bombs = [], eshots = [], enemies = [], parts = [], items = [], floaters = [];
 
 const zi = () => dep * (dep + 1) / 2 + lane;
 const letter = (d = dep, l = lane) => String.fromCharCode(65 + d * (d + 1) / 2 + l);
 const zoneHue = () => (200 + zi() * 67) % 360;
 const diff = () => 1 + dep * 0.22 + loop * 0.7;
-const players = () => P2 ? [P, P2] : [P];
+const players = () => PL;
+const multi = () => PL.length > 1;
 
 function floorY(x) { const s = x + scroll; return H - 14 - 6 * Math.sin(s * 0.013) - 4 * Math.sin(s * 0.031 + 1.3); }
 function ceilY(x) { const s = x + scroll; return 9 + 4 * Math.sin(s * 0.017 + 2) + 3 * Math.sin(s * 0.043); }
-const spawnY = (id, coop) => coop ? (id ? H / 2 + 32 : H / 2 - 32) : H / 2;
+const SPAWN = [H / 2 - 40, H / 2 + 40, H / 2 - 13, H / 2 + 13];
+const spawnY = (id, coop) => coop ? SPAWN[id] : H / 2;
 
 const STARS = Array.from({ length: 70 }, () => ({ x: rnd(0, W), y: rnd(0, H), z: rnd(0.15, 1) }));
 
@@ -221,10 +231,17 @@ function clearWorld() { shots = []; bombs = []; eshots = []; enemies = []; items
 
 function startGame() {
   score = 0; nextExtra = 40000; dep = 0; lane = 0; loop = 0;
-  const coop = net.mode === 'host' && !!net.guestPeer;
-  P = newPlayer(0, coop);
-  P2 = coop ? newPlayer(1, true) : null;
-  if (P2) P2.hitsSeen = guestHits();
+  const coop = net.mode === 'host' && net.guests.size > 0;
+  P = newPlayer(0, coop); PL = [P];
+  if (coop) {
+    const peers = net.nroom.peers();
+    for (const [peer, gi] of net.guests) {
+      const pl = newPlayer(gi.id, true), p = peers.find(x => x.peer === peer);
+      pl.hitsSeen = p && Number.isFinite(p.presence.h) ? p.presence.h : 0;
+      PL.push(pl);
+    }
+    PL.sort((a, b) => a.id - b.id);
+  }
   clearWorld(); newHi = false; paused = false; btnPause.textContent = 'PAUSA';
   startZone();
   if (net.mode === 'host') netUI();
@@ -309,8 +326,10 @@ const DEF = {
 };
 function mk(type, o) {
   const d = DEF[type], D = diff();
-  return Object.assign({ id: ++eid, type, t: 0, r: d.r, hp: Math.ceil(d.hp * (0.8 + D * 0.2) * (P2 ? 1.3 : 1)), score: d.score, fireT: rnd(1, 2.5) / D, flash: 0 }, o);
+  return Object.assign({ id: ++eid, type, t: 0, r: d.r, hp: Math.ceil(d.hp * (0.8 + D * 0.2) * crowd()), score: d.score, fireT: rnd(1, 2.5) / D, flash: 0 }, o);
 }
+/* Con más naves, los enemigos aguantan más. */
+function crowd() { return 1 + 0.3 * (PL.length - 1); }
 function pickItem() { const r = Math.random(); return r < 0.45 ? 'red' : r < 0.73 ? 'green' : 'blue'; }
 function target(x, y) {
   let best = null, bd = Infinity;
@@ -412,7 +431,7 @@ function killEnemy(e) {
 
 /* ---------- Jefe ---------- */
 function startBoss() {
-  const D = diff(), n = zi(), kind = n % 3, hp = Math.round(240 * D * (P2 ? 1.4 : 1));
+  const D = diff(), n = zi(), kind = n % 3, hp = Math.round(240 * D * (1 + 0.4 * (PL.length - 1)));
   boss = { x: W + 110, y: H / 2, rx: BOSS_DIMS[kind][0], ry: BOSS_DIMS[kind][1], hp, max: hp,
     t: 0, enter: true, pat: 3, patT: 1.2, sub: 99, subT: 0, mouth: 0, flash: 0, kind, name: BOSSES[n % BOSSES.length], dying: 0 };
 }
@@ -471,9 +490,14 @@ function afterBoss() {
   if (dep < MAX_DEPTH) { state = 'branch'; branchT = 5.5; }
   else { loop++; dep = 0; lane = 0; startZone(); }
 }
+/* Votan todas las naves que siguen en juego (arriba o abajo); en empate decide el jugador 1. */
+function branchVote() {
+  let up = 0, down = 0;
+  for (const p of PL) { if (p.out) continue; if (p.y < H / 2) up++; else down++; }
+  return up === down ? (P.y < H / 2 ? 0 : 1) : up > down ? 0 : 1;
+}
 function endBranch() {
-  const choice = P.y < H / 2 ? 0 : 1;
-  dep++; lane += choice;
+  dep++; lane += branchVote();
   startZone();
 }
 
@@ -502,7 +526,7 @@ function tickRespawn(pl, dt) {
   pl.respawnT -= dt;
   if (pl.respawnT <= 0) {
     if (pl.lives <= 0) { pl.out = true; if (players().every(p => p.out)) gameOver(); }
-    else { Object.assign(pl, { x: 60, y: spawnY(pl.id, !!P2), inv: 2.5, alive: true }); pl.sp++; }
+    else { Object.assign(pl, { x: 60, y: spawnY(pl.id, multi()), inv: 2.5, alive: true }); pl.sp++; }
   }
   return false;
 }
@@ -513,15 +537,19 @@ function fireTick(pl, dt, firing) {
 }
 function updatePlayers(dt) {
   if (tickRespawn(P, dt)) fireTick(P, dt, moveByInput(P, dt));
-  if (P2 && tickRespawn(P2, dt)) {
-    const g = guestPresence();
+  if (!net.guests.size || !net.nroom) return;
+  const peers = net.nroom.peers();
+  for (const [peer, gi] of net.guests) {
+    const pl = PL.find(x => x.id === gi.id);
+    if (!pl || !tickRespawn(pl, dt)) continue;
+    const p = peers.find(x => x.peer === peer), g = p && p.presence;
     if (g) {
-      if (Number.isFinite(g.x)) P2.x = clamp(g.x, 12, W - 22);
-      if (Number.isFinite(g.y)) P2.y = clamp(g.y, ceilY(P2.x) + 8, floorY(P2.x) - 8);
-      P2.tilt = clamp((+g.t || 0) / 10, -1, 1);
-      P2.firing = g.f === 1;
+      if (Number.isFinite(g.x)) pl.x = clamp(g.x, 12, W - 22);
+      if (Number.isFinite(g.y)) pl.y = clamp(g.y, ceilY(pl.x) + 8, floorY(pl.x) - 8);
+      pl.tilt = clamp((+g.t || 0) / 10, -1, 1);
+      pl.firing = g.f === 1;
     }
-    fireTick(P2, dt, P2.firing);
+    fireTick(pl, dt, pl.firing);
   }
 }
 function hurtPlayer(pl) {
@@ -533,7 +561,7 @@ function hurtPlayer(pl) {
   }
   pl.alive = false; pl.respawnT = 2.2; pl.lives--;
   pl.shot = Math.max(0, pl.shot - 1); pl.bomb = Math.max(0, pl.bomb - 1);
-  boom(pl.x, pl.y, 3, pl.id ? 160 : 45); shake = 10; sfx.die();
+  boom(pl.x, pl.y, 3, P_HUE[pl.id]); shake = 10; sfx.die();
   for (const s of eshots) parts.push({ x: s.x, y: s.y, vx: 0, vy: 0, life: 0.3, max: 0.3, c: '#ff9ad5', s: 2 });
   eshots = [];
 }
@@ -654,18 +682,20 @@ function update(dt) {
   updateFx(dt);
 }
 
-/* ---------- Co-op online (capacidad "room") ----------
+/* ---------- Multijugador online (capacidad "room") ----------
    El anfitrión (jugador 1) simula todo y publica una foto compacta del juego en su presencia.
-   El invitado (jugador 2) mueve su nave en local, publica posición, disparo y un contador de impactos,
-   y dibuja el resto a partir de la foto del anfitrión. */
+   Cada invitado (jugadores 2 a 4) mueve su nave en local, publica posición, disparo y un contador
+   de impactos, y dibuja el resto a partir de la foto del anfitrión. Si la partida está llena,
+   quien entra mira como espectador y ocupa el primer puesto que se libere. */
 const CODE_CH = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 const net = {
   mode: 'solo', lobby: null, nroom: null, code: '', busy: false, msg: '', lobbyKey: '',
-  guestPeer: null, guestSeenAt: 0, flip: 0,
-  myPeer: null, accepted: false, seenHost: false, hostSeenAt: 0, lastSnap: null, lastSp: -1,
+  guests: new Map(), flip: 0,
+  myPeer: null, myId: -1, np: 1, seenHost: false, hostSeenAt: 0, lastSnap: null, lastSp: -1,
   hitN: 0, guard: 0, me: null, prevEnemies: new Map()
 };
 const netEl = { box: document.getElementById('net'), status: document.getElementById('netStatus'), actions: document.getElementById('netActions') };
+const myPl = () => net.myId > 0 ? PL.find(p => p.id === net.myId) || null : null;
 
 function netUI() {
   const a = netEl.actions;
@@ -680,20 +710,21 @@ function netUI() {
   if (net.mode === 'solo') {
     const open = openGames();
     btn('CREAR PARTIDA', hostGame);
-    for (const c of open) btn('UNIRSE A ' + c, () => joinGame(c), true);
+    for (const g of open) btn(`${g.n < MAX_PLAYERS ? 'UNIRSE A' : 'MIRAR'} ${g.code} (${g.n}/${MAX_PLAYERS})`, () => joinGame(g.code), true);
     netEl.status.textContent = net.msg || (open.length
-      ? 'Tu compañero creó una partida: pulsa «Unirse».'
-      : 'Crea una partida y pide a tu compañero que abra este mismo juego.');
+      ? 'Hay una partida abierta: pulsa «Unirse».'
+      : `Crea una partida y pide a tus amigos que abran este mismo juego (hasta ${MAX_PLAYERS} jugadores).`);
   } else if (net.mode === 'host') {
     btn('SALIR', () => leaveGame('Saliste de la partida.'));
-    netEl.status.textContent = net.guestPeer
-      ? `Partida ${net.code} · Jugador 2 conectado. ${state === 'title' ? 'Pulsa Enter o toca la pantalla para empezar.' : ''}`
-      : `Partida ${net.code} · Esperando al jugador 2… (puedes empezar solo y se unirá en marcha)`;
+    const n = net.guests.size + 1;
+    netEl.status.textContent = n > 1
+      ? `Partida ${net.code} · ${n}/${MAX_PLAYERS} jugadores. ${state === 'title' ? 'Pulsa Enter o toca la pantalla para empezar.' : 'Pueden entrar más en marcha.'}`
+      : `Partida ${net.code} · Esperando jugadores… (puedes empezar solo y se unirán en marcha)`;
   } else {
     btn('SALIR', () => leaveGame('Saliste de la partida.'));
     netEl.status.textContent = !net.seenHost ? `Conectando a la partida ${net.code}…`
-      : net.accepted ? `Partida ${net.code} · Eres el jugador 2. El jugador 1 inicia la partida.`
-      : `Partida ${net.code} · Ya hay dos jugadores: estás mirando como espectador.`;
+      : net.myId > 0 ? `Partida ${net.code} · Eres el jugador ${net.myId + 1}. El jugador 1 pone en marcha cada partida.`
+      : `Partida ${net.code} · Está llena (${MAX_PLAYERS}/${MAX_PLAYERS}): miras como espectador y entrarás si se libera un puesto.`;
   }
 }
 function openGames() {
@@ -701,9 +732,14 @@ function openGames() {
   const out = [];
   for (const p of net.lobby.peers()) {
     const c = p.presence && p.presence.open;
-    if (!p.sameTab && typeof c === 'string' && /^[A-Z]{4}$/.test(c) && !out.includes(c)) out.push(c);
+    if (!p.sameTab && typeof c === 'string' && /^[A-Z]{4}$/.test(c) && !out.some(g => g.code === c))
+      out.push({ code: c, n: clamp(Number.isFinite(p.presence.n) ? p.presence.n : 1, 1, MAX_PLAYERS) });
   }
   return out;
+}
+function announceOpen() {
+  if (!net.lobby || net.mode !== 'host') return;
+  net.lobby.presence({ open: net.code, n: net.guests.size + 1 }).catch(() => {});
 }
 async function hostGame() {
   if (net.busy) return;
@@ -712,10 +748,10 @@ async function hostGame() {
   let nr;
   try { nr = await net.lobby.join('abismo-' + code.toLowerCase()); }
   catch (e) { net.busy = false; net.msg = 'No se pudo crear la partida. Inténtalo de nuevo.'; netUI(); return; }
-  Object.assign(net, { busy: false, mode: 'host', nroom: nr, code, guestPeer: null, msg: '' });
-  state = 'title'; paused = false; P = newPlayer(0, false); P2 = null; clearWorld();
+  Object.assign(net, { busy: false, mode: 'host', nroom: nr, code, guests: new Map(), msg: '' });
+  state = 'title'; paused = false; P = newPlayer(0, false); PL = [P]; clearWorld();
   nr.onPeers(() => {}, () => leaveGame('Se perdió la conexión con la partida.'));
-  net.lobby.presence({ open: code }).catch(() => {});
+  announceOpen();
   nr.presence({ role: 'host' }).catch(() => {});
   netUI();
 }
@@ -726,9 +762,9 @@ async function joinGame(code) {
   try { nr = await net.lobby.join('abismo-' + code.toLowerCase()); }
   catch (e) { net.busy = false; net.msg = 'No se pudo entrar en la partida. Inténtalo de nuevo.'; netUI(); return; }
   Object.assign(net, { busy: false, mode: 'guest', nroom: nr, code, msg: '', seenHost: false, hostSeenAt: performance.now(),
-    lastSnap: null, accepted: false, lastSp: -1, hitN: 0, guard: 0, prevEnemies: new Map(),
-    me: { x: 60, y: spawnY(1, true), tilt: 0, fireCd: 0 } });
-  state = 'title'; paused = false; P = newPlayer(0, true); P2 = null; clearWorld();
+    lastSnap: null, myId: -1, np: 1, lastSp: -1, hitN: 0, guard: 0, prevEnemies: new Map(),
+    me: { x: 60, y: H / 2, tilt: 0, fireCd: 0 } });
+  state = 'title'; paused = false; P = newPlayer(0, true); PL = [P]; clearWorld();
   nr.onPeers(() => {}, () => leaveGame('Se perdió la conexión con la partida.'));
   nr.presence({ role: 'guest', h: 0 }).catch(() => {});
   netUI();
@@ -736,57 +772,59 @@ async function joinGame(code) {
 function leaveGame(msg) {
   if (net.mode === 'solo') return;
   const nr = net.nroom;
-  if (net.mode === 'host') net.lobby.presence({ open: null }).catch(() => {});
-  Object.assign(net, { mode: 'solo', nroom: null, guestPeer: null, accepted: false, msg: msg || '' });
-  state = 'title'; paused = false; btnPause.textContent = 'PAUSA'; P = newPlayer(0, false); P2 = null; clearWorld();
+  if (net.mode === 'host') net.lobby.presence({ open: null, n: null }).catch(() => {});
+  Object.assign(net, { mode: 'solo', nroom: null, guests: new Map(), myId: -1, msg: msg || '' });
+  state = 'title'; paused = false; btnPause.textContent = 'PAUSA'; P = newPlayer(0, false); PL = [P]; clearWorld();
   if (nr) nr.leave().catch(() => {});
   netUI();
 }
 
 // --- anfitrión ---
-function guestPeerObj() { return net.nroom && net.guestPeer ? net.nroom.peers().find(p => p.peer === net.guestPeer) : null; }
-function guestPresence() { const g = guestPeerObj(); return g ? g.presence : null; }
-function guestHits() { const g = guestPresence(); return g && Number.isFinite(g.h) ? g.h : 0; }
 function netHostTick() {
   const nr = net.nroom; if (!nr) return;
-  const now = performance.now();
-  if (net.guestPeer) {
-    const g = guestPeerObj();
-    if (g) {
-      net.guestSeenAt = now;
-      const h = Number.isFinite(g.presence.h) ? g.presence.h : 0;
-      if (P2 && h > P2.hitsSeen) { P2.hitsSeen = h; hurtPlayer(P2); }
-    } else if (now - net.guestSeenAt > 2500) {
-      net.guestPeer = null; P2 = null;
-      net.lobby.presence({ open: net.code }).catch(() => {});
-      floaters.push({ x: W / 2, y: H / 2, txt: 'EL JUGADOR 2 SE DESCONECTÓ', life: 2.5, c: P_COL[1] });
-      netUI();
-    }
-  } else {
-    const c = nr.peers().find(p => !p.sameTab && p.presence && p.presence.role === 'guest');
-    if (c) {
-      net.guestPeer = c.peer; net.guestSeenAt = now;
-      net.lobby.presence({ open: null }).catch(() => {});
-      if (state === 'play' || state === 'branch' || state === 'over') {
-        P2 = newPlayer(1, true); P2.hitsSeen = Number.isFinite(c.presence.h) ? c.presence.h : 0;
-        if (state === 'over') { P2.alive = false; P2.out = true; P2.lives = 0; }
-      }
-      sfx.item();
-      floaters.push({ x: W / 2, y: H / 2, txt: '¡JUGADOR 2 CONECTADO!', life: 2.5, c: P_COL[1] });
-      netUI();
+  const now = performance.now(), peers = nr.peers();
+  let changed = false;
+  for (const [peer, gi] of net.guests) {
+    const p = peers.find(x => x.peer === peer);
+    if (p) {
+      gi.seenAt = now;
+      const pl = PL.find(x => x.id === gi.id), h = Number.isFinite(p.presence.h) ? p.presence.h : 0;
+      if (pl && h > pl.hitsSeen) { pl.hitsSeen = h; hurtPlayer(pl); }
+    } else if (now - gi.seenAt > 2500) {
+      net.guests.delete(peer);
+      PL = PL.filter(x => x.id !== gi.id);
+      floaters.push({ x: W / 2, y: H / 2, txt: `EL JUGADOR ${gi.id + 1} SE DESCONECTÓ`, life: 2.5, c: P_COL[gi.id] });
+      changed = true;
     }
   }
+  for (const p of peers) {
+    if (net.guests.size >= MAX_PLAYERS - 1) break;
+    if (p.sameTab || net.guests.has(p.peer) || !p.presence || p.presence.role !== 'guest') continue;
+    const used = new Set([...net.guests.values()].map(g => g.id));
+    let id = 1; while (used.has(id)) id++;
+    net.guests.set(p.peer, { id, seenAt: now });
+    if (state === 'play' || state === 'branch' || state === 'over') {
+      const pl = newPlayer(id, true);
+      pl.hitsSeen = Number.isFinite(p.presence.h) ? p.presence.h : 0;
+      if (state === 'over') { pl.alive = false; pl.out = true; pl.lives = 0; }
+      PL.push(pl); PL.sort((a, b) => a.id - b.id);
+    }
+    sfx.item();
+    floaters.push({ x: W / 2, y: H / 2 + (id - 2) * 10, txt: `¡JUGADOR ${id + 1} CONECTADO!`, life: 2.5, c: P_COL[id] });
+    changed = true;
+  }
+  if (changed) { announceOpen(); netUI(); }
   net.flip ^= 1;
   if (net.flip) {
     let s = buildSnap(110, 45, 30);
-    if (JSON.stringify(s).length > 3500) s = buildSnap(45, 15, 12);
+    if (JSON.stringify(s).length > 3400) s = buildSnap(45, 15, 12);
     if (JSON.stringify(s).length > 3800) s = buildSnap(0, 0, 0);
     nr.presence({ role: 'host', g: s }).catch(() => {});
   }
 }
 function buildSnap(nE, nS, nB) {
   const r = Math.round;
-  const pl = p => p ? [r(p.x), r(p.y), r(p.tilt * 10), p.alive ? 1 : 0, p.inv > 0 ? 1 : 0, p.shot, p.bomb, p.arm, p.lives, p.sp, p.out ? 1 : 0] : 0;
+  const pl = p => [p.id, r(p.x), r(p.y), r(p.tilt * 10), p.alive ? 1 : 0, p.inv > 0 ? 1 : 0, p.shot, p.bomb, p.arm, p.lives, p.sp, p.out ? 1 : 0];
   const e = [];
   for (const x of enemies) {
     let ex = 0;
@@ -808,7 +846,8 @@ function buildSnap(nE, nS, nB) {
   return {
     s: STATES.indexOf(state), ph: PHASES.indexOf(phase), d: dep, l: lane, lp: loop, sc: score, hi,
     zc: r(zoneCard * 10), wt: r(Math.max(0, warnT) * 10), bt: r(Math.max(0, branchT) * 10), ot: r(Math.min(overT, 99) * 10),
-    nh: newHi ? 1 : 0, pz: paused ? 1 : 0, scr: r(scroll), p: [pl(P), pl(P2)], e, es, sh, bo, it, b, gp: net.guestPeer || ''
+    nh: newHi ? 1 : 0, pz: paused ? 1 : 0, scr: r(scroll), p: PL.map(pl), e, es, sh, bo, it, b,
+    gp: [...net.guests].map(([peer, g]) => [peer, g.id]), np: net.guests.size + 1
   };
 }
 
@@ -816,35 +855,45 @@ function buildSnap(nE, nS, nB) {
 const num = v => Number.isFinite(v) ? v : 0;
 function decodePlayer(a, prev, id) {
   const o = prev && prev.id === id ? prev : newPlayer(id, true);
-  if (!Array.isArray(a)) return o;
-  o.x = num(a[0]); o.y = num(a[1]); o.tilt = num(a[2]) / 10; o.alive = a[3] === 1; o.inv = a[4] === 1 ? 1 : 0;
-  o.shot = clamp(num(a[5]), 0, 3); o.bomb = clamp(num(a[6]), 0, 2); o.arm = clamp(num(a[7]), 0, 6);
-  o.lives = clamp(num(a[8]), 0, 99); o.sp = num(a[9]); o.out = a[10] === 1;
+  o.x = num(a[1]); o.y = num(a[2]); o.tilt = num(a[3]) / 10; o.alive = a[4] === 1; o.inv = a[5] === 1 ? 1 : 0;
+  o.shot = clamp(num(a[6]), 0, 3); o.bomb = clamp(num(a[7]), 0, 2); o.arm = clamp(num(a[8]), 0, 6);
+  o.lives = clamp(num(a[9]), 0, 99); o.sp = num(a[10]); o.out = a[11] === 1;
   return o;
 }
 function applySnap(g) {
-  const prevPhase = phase, prevP = P && { alive: P.alive, x: P.x, y: P.y };
-  const prevP2 = P2 && { alive: P2.alive, shot: P2.shot, bomb: P2.bomb, arm: P2.arm };
-  const prevBoss = boss;
+  const prevPhase = phase, prevBoss = boss;
+  const prev = new Map(PL.map(p => [p.id, { alive: p.alive, x: p.x, y: p.y, shot: p.shot, bomb: p.bomb, arm: p.arm }]));
   state = STATES[g.s] || 'title'; phase = PHASES[g.ph] || 'waves';
   dep = clamp(num(g.d), 0, MAX_DEPTH); lane = clamp(num(g.l), 0, dep); loop = num(g.lp); score = num(g.sc);
   hi = Math.max(hi, num(g.hi));
   zoneCard = num(g.zc) / 10; warnT = num(g.wt) / 10; branchT = num(g.bt) / 10; overT = num(g.ot) / 10;
-  newHi = g.nh === 1; paused = g.pz === 1;
+  newHi = g.nh === 1; paused = g.pz === 1; net.np = clamp(num(g.np), 1, MAX_PLAYERS);
   const scr = num(g.scr);
   if (Math.abs(scroll - scr) > 30) scroll = scr; else scroll += (scr - scroll) * 0.3;
 
-  const acc = !!net.myPeer && g.gp === net.myPeer;
-  if (acc !== net.accepted || !net.seenHost) { net.accepted = acc; net.seenHost = true; netUI(); }
+  let myId = -1;
+  if (Array.isArray(g.gp)) for (const e of g.gp) if (Array.isArray(e) && e[0] === net.myPeer) myId = clamp(num(e[1]), 1, MAX_PLAYERS - 1);
+  if (myId !== net.myId || !net.seenHost) { net.myId = myId; net.seenHost = true; net.lastSp = -1; netUI(); }
 
-  const pa = Array.isArray(g.p) ? g.p : [];
-  P = decodePlayer(pa[0], P, 0);
-  P2 = pa[1] ? decodePlayer(pa[1], P2, 1) : null;
-  if (prevP && prevP.alive && !P.alive) { boom(prevP.x, prevP.y, 3, 45); sfx.die(); shake = 8; }
-  if (P2 && net.accepted) {
-    if (P2.sp !== net.lastSp) { net.lastSp = P2.sp; net.me.x = 60; net.me.y = spawnY(1, true); }
-    if (prevP2 && prevP2.alive && !P2.alive) { boom(net.me.x, net.me.y, 3, 160); sfx.die(); shake = 10; }
-    if (prevP2 && (P2.shot > prevP2.shot || P2.bomb > prevP2.bomb || P2.arm > prevP2.arm)) sfx.item();
+  const next = [];
+  for (const a of Array.isArray(g.p) ? g.p : []) {
+    if (!Array.isArray(a)) continue;
+    const id = clamp(num(a[0]), 0, MAX_PLAYERS - 1);
+    if (next.some(p => p.id === id)) continue;
+    next.push(decodePlayer(a, PL.find(p => p.id === id), id));
+  }
+  if (!next.some(p => p.id === 0)) next.unshift(P && P.id === 0 ? P : newPlayer(0, true));
+  PL = next; P = PL.find(p => p.id === 0);
+  const mine = myPl();
+  if (mine && mine.sp !== net.lastSp) { net.lastSp = mine.sp; net.me.x = 60; net.me.y = spawnY(mine.id, true); }
+  for (const pl of PL) {
+    const pr = prev.get(pl.id);
+    if (!pr) continue;
+    if (pr.alive && !pl.alive) {
+      const isMe = pl === mine;
+      boom(isMe ? net.me.x : pr.x, isMe ? net.me.y : pr.y, 3, P_HUE[pl.id]); sfx.die(); shake = isMe ? 10 : 6;
+    }
+    if (pl === mine && (pl.shot > pr.shot || pl.bomb > pr.bomb || pl.arm > pr.arm)) sfx.item();
   }
 
   const list = Array.isArray(g.e) ? g.e : [], now = new Map();
@@ -888,7 +937,7 @@ function applySnap(g) {
 function guestUpdate(dt) {
   const nr = net.nroom; if (!nr) return;
   const now = performance.now(), peers = nr.peers();
-  const mine = peers.find(p => p.sameTab); if (mine) net.myPeer = mine.peer;
+  const self = peers.find(p => p.sameTab); if (self) net.myPeer = self.peer;
   const host = peers.find(p => !p.sameTab && p.presence && p.presence.role === 'host');
   if (host) {
     net.hostSeenAt = now;
@@ -907,15 +956,15 @@ function guestUpdate(dt) {
   if (boss && boss.dying && Math.random() < 0.5) boom(boss.x + rnd(-boss.rx, boss.rx), boss.y + rnd(-boss.ry, boss.ry), 1, rnd(0, 60));
 
   let firing = false;
-  const me = net.me, active = !paused && (state === 'play' || state === 'branch');
-  if (net.accepted && P2) {
-    if (P2.alive && active) firing = moveByInput(me, dt);
+  const me = net.me, mine = myPl(), active = !paused && (state === 'play' || state === 'branch');
+  if (mine) {
+    if (mine.alive && active) firing = moveByInput(me, dt);
     else if (touch) touch.dx = touch.dy = 0;
     me.fireCd -= dt;
     if (firing && me.fireCd <= 0) { sfx.shot(); me.fireCd = 0.13; }
-    P2.x = me.x; P2.y = me.y; P2.tilt = me.tilt;
+    mine.x = me.x; mine.y = me.y; mine.tilt = me.tilt;
     net.guard -= dt;
-    if (P2.alive && !P2.inv && net.guard <= 0 && active) {
+    if (mine.alive && !mine.inv && net.guard <= 0 && active) {
       let hit = false;
       for (const s of eshots) {
         const dx = s.x - me.x, dy = s.y - me.y, rr = 2.5 + s.r * 0.8;
@@ -925,7 +974,7 @@ function guestUpdate(dt) {
       if (!hit && bossHit(me.x, me.y, -4)) hit = true;
       if (hit) { net.hitN++; net.guard = 1; }
     }
-  }
+  } else if (touch) touch.dx = touch.dy = 0;
   nr.presence({ role: 'guest', x: Math.round(me.x), y: Math.round(me.y), t: Math.round(me.tilt * 10), f: firing ? 1 : 0, h: net.hitN }).catch(() => {});
   updateFx(dt);
 }
@@ -934,13 +983,13 @@ function guestUpdate(dt) {
   const use = window.claude && window.claude.use;
   const room = use ? await window.claude.use('room').catch(() => null) : null;
   if (!room) {
-    netEl.status.textContent = 'El co-op online funciona cuando el juego se abre en claude.ai (compartido con tu compañero). Aquí puedes jugar solo.';
+    netEl.status.textContent = 'El multijugador online funciona cuando el juego se abre en claude.ai (compartido con tus amigos). Aquí puedes jugar solo.';
     return;
   }
   net.lobby = room;
   room.onPeers(() => {
     if (net.mode !== 'solo') return;
-    const key = openGames().join(',');
+    const key = openGames().map(g => g.code + g.n).join(',');
     if (key !== net.lobbyKey) { net.lobbyKey = key; netUI(); }
   }, () => { net.lobby = null; netEl.actions.textContent = ''; netEl.status.textContent = 'No hay conexión con la sala. Puedes jugar solo.'; });
   netUI();
@@ -991,19 +1040,20 @@ function drawBG() {
   }
 }
 function drawShip(x, y, tilt, scale = 1, id = 0) {
+  const c = SHIP[id] || SHIP[0];
   ctx.save(); ctx.translate(x, y); ctx.scale(scale, scale);
   const f = 4 + Math.random() * 5;
-  ctx.fillStyle = id ? '#ffd27f' : '#7fe3ff';
+  ctx.fillStyle = c.flame;
   ctx.beginPath(); ctx.moveTo(-9, -2.5); ctx.lineTo(-9 - f, 0); ctx.lineTo(-9, 2.5); ctx.fill();
   ctx.fillStyle = '#ffffff';
   ctx.beginPath(); ctx.moveTo(-9, -1); ctx.lineTo(-9 - f * 0.5, 0); ctx.lineTo(-9, 1); ctx.fill();
-  ctx.fillStyle = id ? '#2f8f8a' : '#7d8ea3';
+  ctx.fillStyle = c.wing;
   ctx.beginPath(); ctx.moveTo(1, -3); ctx.lineTo(-7, -10 + tilt * 2); ctx.lineTo(-4, -3); ctx.fill();
   ctx.beginPath(); ctx.moveTo(1, 3); ctx.lineTo(-7, 10 + tilt * 2); ctx.lineTo(-4, 3); ctx.fill();
-  ctx.fillStyle = id ? '#c8f5ec' : '#d5e0ea';
+  ctx.fillStyle = c.hull;
   ctx.beginPath(); ctx.moveTo(13, 0.5); ctx.lineTo(3, -4); ctx.lineTo(-8, -4.5); ctx.lineTo(-10, -2); ctx.lineTo(-10, 2); ctx.lineTo(-8, 4.5); ctx.lineTo(3, 4); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = id ? '#3fa597' : '#8496ab'; ctx.fillRect(-8, 1, 15, 1.5);
-  ctx.fillStyle = P_COL[id];
+  ctx.fillStyle = c.stripe; ctx.fillRect(-8, 1, 15, 1.5);
+  ctx.fillStyle = P_COL[id] || P_COL[0];
   ctx.beginPath(); ctx.ellipse(3, -1.2, 4, 1.8, 0, 0, Math.PI * 2); ctx.fill();
   ctx.restore();
 }
@@ -1112,31 +1162,39 @@ function drawItem(it) {
   text(ITEM_TXT[it.kind], 0.5, 0.5, 7, '#ffffff', 'center', true);
   ctx.restore();
 }
-function drawPlayerHUD(pl, right) {
-  const ops = [], y = H - 8;
-  if (P2) ops.push([15, x => text(pl.id ? '2P' : '1P', x, y, 7, P_COL[pl.id], 'left', true)]);
-  const n = Math.min(pl.lives, 4);
-  for (let j = 0; j < n; j++) ops.push([13, x => drawShip(x + 6, y, 0, 0.5, pl.id)]);
-  if (pl.lives > 4) ops.push([16, x => text('x' + pl.lives, x, y, 6, '#ffffff')]);
-  if (pl.out) ops.push([44, x => text('SIN NAVES', x, y, 6, '#ff9ab0')]);
-  ops.push([6, () => {}]);
+/* Bloque de vidas y armas de una nave. Con 3 o 4 naves se usa la versión compacta. */
+function drawPlayerHUD(pl, x0, right, compact) {
+  const ops = [], y = H - 8, pip = (v, max, c) => { for (let s = 0; s < max; s++) ops.push([4, x => { ctx.fillStyle = s < v ? c : 'rgba(255,255,255,.18)'; ctx.fillRect(x, H - 11, 3, 6); }]); };
+  if (multi()) ops.push([14, x => text((pl.id + 1) + 'P', x, y, 7, P_COL[pl.id], 'left', true)]);
+  if (pl.out) ops.push([compact ? 30 : 44, x => text(compact ? 'FUERA' : 'SIN NAVES', x, y, 6, '#ff9ab0')]);
+  else if (compact) { ops.push([12, x => drawShip(x + 6, y, 0, 0.5, pl.id)]); ops.push([10, x => text(String(pl.lives), x, y, 6, '#ffffff')]); }
+  else {
+    for (let j = 0; j < Math.min(pl.lives, 4); j++) ops.push([13, x => drawShip(x + 6, y, 0, 0.5, pl.id)]);
+    if (pl.lives > 4) ops.push([16, x => text('x' + pl.lives, x, y, 6, '#ffffff')]);
+  }
+  ops.push([compact ? 2 : 6, () => {}]);
   for (const [ch, v, max, c] of [['M', pl.shot, 3, ITEM_COL.red], ['B', pl.bomb, 2, ITEM_COL.green], ['E', pl.arm, 6, ITEM_COL.blue]]) {
-    ops.push([8, x => text(ch, x, y, 6, c)]);
-    for (let s = 0; s < max; s++) ops.push([4, x => { ctx.fillStyle = s < v ? c : 'rgba(255,255,255,.18)'; ctx.fillRect(x, H - 11, 3, 6); }]);
-    ops.push([5, () => {}]);
+    ops.push([7, x => text(ch, x, y, 6, c)]);
+    if (compact && ch === 'E') pip(Math.ceil(v / 2), 3, c); else pip(v, max, c);
+    ops.push([compact ? 3 : 5, () => {}]);
   }
   const total = ops.reduce((a, o) => a + o[0], 0);
-  let x = right ? W - 6 - total : 6;
+  let x = right ? x0 - total : x0;
   for (const [w, fn] of ops) { fn(x); x += w; }
 }
 function drawHUD() {
   const pad = (n, l) => String(n).padStart(l, '0');
   ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(0, 0, W, 13);
-  text((P2 ? 'EQUIPO ' : '1P ') + pad(score, 8), 6, 7, 8, '#ffffff');
+  text((multi() ? 'EQUIPO ' : '1P ') + pad(score, 8), 6, 7, 8, '#ffffff');
   text('HI ' + pad(Math.max(hi, score), 8), W / 2, 7, 8, '#ffc93c', 'center');
   text('ZONA ' + letter() + (loop ? ' · V' + (loop + 1) : ''), W - 6, 7, 8, '#9fe3ff', 'right');
-  drawPlayerHUD(P, false);
-  if (P2) drawPlayerHUD(P2, true);
+  if (PL.length <= 2) {
+    drawPlayerHUD(PL[0], 6, false, false);
+    if (PL[1]) drawPlayerHUD(PL[1], W - 6, true, false);
+  } else {
+    const slot = (W - 12) / PL.length;
+    PL.forEach((pl, i) => drawPlayerHUD(pl, 6 + i * slot, false, true));
+  }
   if (boss && !boss.enter) {
     const w = 160, bx = W / 2 - w / 2;
     text(boss.name, W / 2, 19, 6, '#ff9ab0', 'center');
@@ -1161,7 +1219,7 @@ function drawOverlay() {
     text(BOSSES[zi() % BOSSES.length], W / 2, H / 2 + 20, 9, '#ffffff', 'center', true);
   }
   if (state === 'branch' && dep < MAX_DEPTH) {
-    const up = P.y < H / 2;
+    const up = branchVote() === 0;
     const base = (dep + 1) * (dep + 2) / 2 + lane;
     const zones = [[letter(dep + 1, lane), ZONES[base]], [letter(dep + 1, lane + 1), ZONES[base + 1]]];
     for (let j = 0; j < 2; j++) {
@@ -1172,7 +1230,7 @@ function drawOverlay() {
     }
     ctx.fillStyle = 'rgba(255,255,255,.5)'; ctx.fillRect(0, H / 2, W, 1);
     text('ZONA DESPEJADA · ELIGE TU RUTA', 16, 26, 8, '#ffc93c');
-    if (P2) text('DECIDE LA POSICIÓN DEL JUGADOR 1', 16, 38, 6, '#c9d6e3');
+    if (multi()) text('VOTAN TODAS LAS NAVES · EMPATE: DECIDE EL 1P', 16, 38, 6, '#c9d6e3');
     text(String(Math.ceil(branchT)), 16, H / 2, 20, '#ffffff', 'left', true);
   }
   if (paused) {
@@ -1191,21 +1249,23 @@ function drawOverlay() {
 }
 function drawTitle() {
   const bob = Math.sin(time * 2) * 4;
-  const coop = net.mode !== 'solo';
-  drawShip(110, (coop ? 135 : 150) + bob, 0, 2.6, 0);
-  if (coop) drawShip(90, 175 - bob, 0, 2.2, 1);
+  const n = net.mode === 'host' ? net.guests.size + 1 : net.mode === 'guest' ? net.np : 1;
+  if (n === 1) drawShip(110, 150 + bob, 0, 2.6, 0);
+  else for (let j = 0; j < n; j++) drawShip(118 - (j % 2) * 26, 128 + j * (78 / (n - 1)) + (j % 2 ? -bob : bob), 0, n > 2 ? 1.7 : 2.2, j);
   for (let j = 0; j < 3; j++) drawFish({ x: 330 + j * 28, y: 150 + Math.sin(time * 2.4 + j * 0.6) * 18, t: time, flash: 0 }, 350, 1.3);
   text('ABISMO', W / 2, 62, 34, '#ffc93c', 'center', true);
   text('ESTELAR', W / 2, 94, 20, '#9fe3ff', 'center', true);
-  let line = 'PULSA ENTER O TOCA LA PANTALLA', sub = '';
+  let line = 'PULSA ENTER O TOCA LA PANTALLA', sub = '', col = '#ffffff';
   if (net.mode === 'host') {
-    line = net.guestPeer ? 'JUGADOR 2 LISTO · PULSA ENTER O TOCA' : 'ESPERANDO AL JUGADOR 2…';
-    sub = 'PARTIDA ' + net.code + (net.guestPeer ? '' : ' · ENTER PARA EMPEZAR SOLO');
+    line = n > 1 ? `${n}/${MAX_PLAYERS} JUGADORES · PULSA ENTER O TOCA` : 'ESPERANDO JUGADORES…';
+    sub = 'PARTIDA ' + net.code + (n > 1 ? '' : ' · ENTER PARA EMPEZAR SOLO');
+    col = P_COL[1];
   } else if (net.mode === 'guest') {
-    line = !net.seenHost ? 'CONECTANDO…' : net.accepted ? 'CONECTADO COMO JUGADOR 2' : 'MIRANDO COMO ESPECTADOR';
-    sub = 'ESPERANDO A QUE EL JUGADOR 1 EMPIECE';
+    line = !net.seenHost ? 'CONECTANDO…' : net.myId > 0 ? `CONECTADO COMO JUGADOR ${net.myId + 1}` : 'PARTIDA LLENA · MIRAS COMO ESPECTADOR';
+    sub = `${n}/${MAX_PLAYERS} JUGADORES · ESPERANDO A QUE EL JUGADOR 1 EMPIECE`;
+    col = net.myId > 0 ? P_COL[net.myId] : '#c9d6e3';
   }
-  if (Math.floor(time * 2) % 2 === 0 || net.mode !== 'solo') text(line, W / 2, 200, 8, net.mode === 'solo' ? '#ffffff' : P_COL[1], 'center');
+  if (Math.floor(time * 2) % 2 === 0 || net.mode !== 'solo') text(line, W / 2, 200, 8, col, 'center');
   if (sub) text(sub, W / 2, 213, 6, '#c9d6e3', 'center');
   text('ORBES:  M = MISIL   B = BOMBA   E = ESCUDO', W / 2, 232, 6, '#c9d6e3', 'center');
   text('RÉCORD ' + String(hi).padStart(8, '0'), W / 2, 250, 7, '#ffc93c', 'center');
@@ -1235,7 +1295,7 @@ function render() {
   for (const pl of players()) {
     if (!pl.alive || (pl.inv > 0 && Math.floor(time * 16) % 2 === 0)) continue;
     drawShip(pl.x, pl.y, pl.tilt, 1, pl.id);
-    if (P2) text(pl.id ? '2P' : '1P', pl.x, pl.y - 13, 5, P_COL[pl.id], 'center');
+    if (multi()) text((pl.id + 1) + 'P', pl.x, pl.y - 13, 5, P_COL[pl.id], 'center');
     if (pl.arm > 0) {
       ctx.strokeStyle = `rgba(90,170,255,${0.3 + pl.arm * 0.1})`; ctx.lineWidth = 1 + pl.arm * 0.3;
       ctx.beginPath(); ctx.arc(pl.x + 1, pl.y, 14 + Math.sin(time * 6), 0, Math.PI * 2); ctx.stroke();
@@ -1255,7 +1315,7 @@ function render() {
   drawOverlay();
 }
 
-P = newPlayer(0, false);
+P = newPlayer(0, false); PL = [P];
 let last = performance.now();
 function frame(now) {
   let dt = (now - last) / 1000; last = now;
